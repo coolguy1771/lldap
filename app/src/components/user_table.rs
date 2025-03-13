@@ -25,16 +25,19 @@ type User = list_users_query::ListUsersQueryUsers;
 pub struct UserTable {
     common: CommonComponentParts<Self>,
     users: Option<Vec<User>>,
+    search_query: String,
 }
 
 pub enum Msg {
     ListUsersResponse(Result<ResponseData>),
     OnUserDeleted(String),
     OnError(Error),
+    OnSearchChange(String),
+    SearchUsers,
 }
 
 impl CommonComponent<UserTable> for UserTable {
-    fn handle_msg(&mut self, _: &Context<Self>, msg: <Self as Component>::Message) -> Result<bool> {
+    fn handle_msg(&mut self, ctx: &Context<Self>, msg: <Self as Component>::Message) -> Result<bool> {
         match msg {
             Msg::ListUsersResponse(users) => {
                 self.users = Some(users?.users.into_iter().collect());
@@ -44,6 +47,60 @@ impl CommonComponent<UserTable> for UserTable {
             Msg::OnUserDeleted(user_id) => {
                 debug_assert!(self.users.is_some());
                 self.users.as_mut().unwrap().retain(|u| u.id != user_id);
+                Ok(true)
+            }
+            Msg::OnSearchChange(query) => {
+                self.search_query = query;
+                Ok(false)
+            }
+            Msg::SearchUsers => {
+                let filter = if self.search_query.is_empty() {
+                    None
+                } else {
+                    Some(RequestFilter {
+                        any: Box::new(Some(vec![
+                            RequestFilter {
+                                eq: Some(list_users_query::EqualityConstraint {
+                                    field: "id".to_string(),
+                                    value: self.search_query.clone(),
+                                }),
+                                all: Box::new(None),
+                                any: Box::new(None),
+                                not: Box::new(None),
+                                memberOf: None,
+                                memberOfId: None,
+                            },
+                            RequestFilter {
+                                eq: Some(list_users_query::EqualityConstraint {
+                                    field: "email".to_string(),
+                                    value: self.search_query.clone(),
+                                }),
+                                all: Box::new(None),
+                                any: Box::new(None),
+                                not: Box::new(None),
+                                memberOf: None,
+                                memberOfId: None,
+                            },
+                            RequestFilter {
+                                eq: Some(list_users_query::EqualityConstraint {
+                                    field: "displayName".to_string(),
+                                    value: self.search_query.clone(),
+                                }),
+                                all: Box::new(None),
+                                any: Box::new(None),
+                                not: Box::new(None),
+                                memberOf: None,
+                                memberOfId: None,
+                            }
+                        ])),
+                        all: Box::new(None),
+                        not: Box::new(None),
+                        eq: None,
+                        memberOf: None,
+                        memberOfId: None,
+                    })
+                };
+                self.get_users(ctx, filter);
                 Ok(true)
             }
         }
@@ -73,6 +130,7 @@ impl Component for UserTable {
         let mut table = UserTable {
             common: CommonComponentParts::<Self>::create(),
             users: None,
+            search_query: String::new(),
         };
         table.get_users(ctx, None);
         table
@@ -85,6 +143,7 @@ impl Component for UserTable {
     fn view(&self, ctx: &Context<Self>) -> Html {
         html! {
             <div>
+              {self.view_search_bar(ctx)}
               {self.view_users(ctx)}
               {self.view_errors()}
             </div>
@@ -93,6 +152,68 @@ impl Component for UserTable {
 }
 
 impl UserTable {
+    fn view_search_bar(&self, ctx: &Context<Self>) -> Html {
+        let link = ctx.link();
+        html! {
+            <div class="card mb-3">
+                <div class="card-body">
+                    <h5 class="card-title">{"Search Users"}</h5>
+                    <div class="row g-3 align-items-center">
+                        <div class="col-auto">
+                            <input 
+                                type="text" 
+                                class="form-control" 
+                                placeholder="Search by ID, email, or display name"
+                                value={self.search_query.clone()}
+                                oninput={link.callback(|e: InputEvent| {
+                                    let input: web_sys::HtmlInputElement = e.target_unchecked_into();
+                                    Msg::OnSearchChange(input.value())
+                                })}
+                                onkeypress={link.callback(|e: KeyboardEvent| {
+                                    if e.key() == "Enter" {
+                                        Msg::SearchUsers
+                                    } else {
+                                        Msg::OnSearchChange("".to_string())
+                                    }
+                                })}
+                            />
+                        </div>
+                        <div class="col-auto">
+                            <button 
+                                class="btn btn-primary"
+                                onclick={link.callback(|_| Msg::SearchUsers)}
+                                disabled={self.common.is_task_running()}
+                            >
+                                <i class="bi-search me-2"></i>
+                                {"Search"}
+                            </button>
+                        </div>
+                        {
+                            if !self.search_query.is_empty() {
+                                html! {
+                                    <div class="col-auto">
+                                        <button 
+                                            class="btn btn-secondary"
+                                            onclick={link.batch_callback(|_| vec![
+                                                Msg::OnSearchChange("".to_string()),
+                                                Msg::SearchUsers
+                                            ])}
+                                        >
+                                            <i class="bi-x-circle me-2"></i>
+                                            {"Clear"}
+                                        </button>
+                                    </div>
+                                }
+                            } else {
+                                html! {}
+                            }
+                        }
+                    </div>
+                </div>
+            </div>
+        }
+    }
+
     fn view_users(&self, ctx: &Context<Self>) -> Html {
         let make_table = |users: &Vec<User>| {
             html! {
@@ -118,7 +239,18 @@ impl UserTable {
         };
         match &self.users {
             None => html! {{"Loading..."}},
-            Some(users) => make_table(users),
+            Some(users) => {
+                if users.is_empty() && !self.search_query.is_empty() {
+                    html! {
+                        <div class="alert alert-info" role="alert">
+                            <i class="bi-info-circle me-2"></i>
+                            {"No users found matching your search criteria."}
+                        </div>
+                    }
+                } else {
+                    make_table(users)
+                }
+            },
         }
     }
 

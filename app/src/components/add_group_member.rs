@@ -1,5 +1,5 @@
 use crate::{
-    components::select::{Select, SelectOption, SelectOptionProps},
+    components::select::{SearchableSelect, SelectOptionProps},
     infra::common_component::{CommonComponent, CommonComponentParts},
 };
 use anyhow::{Error, Result};
@@ -32,15 +32,17 @@ pub struct AddGroupMemberComponent {
     common: CommonComponentParts<Self>,
     /// The list of existing users, initially not loaded.
     user_list: Option<Vec<User>>,
-    /// The currently selected user.
-    selected_user: Option<User>,
+    /// The currently selected users.
+    selected_users: Vec<User>,
+    /// For tracking add user status
+    current_add_index: usize,
 }
 
 pub enum Msg {
     UserListResponse(Result<list_user_names::ResponseData>),
-    SubmitAddMember,
+    SubmitAddMembers,
     AddMemberResponse(Result<add_user_to_group::ResponseData>),
-    SelectionChanged(Option<SelectOptionProps>),
+    SelectionChanged(Vec<SelectOptionProps>),
 }
 
 #[derive(yew::Properties, Clone, PartialEq)]
@@ -61,24 +63,33 @@ impl CommonComponent<AddGroupMemberComponent> for AddGroupMemberComponent {
             Msg::UserListResponse(response) => {
                 self.user_list = Some(response?.users);
             }
-            Msg::SubmitAddMember => return self.submit_add_member(ctx),
+            Msg::SubmitAddMembers => return self.submit_add_members(ctx),
             Msg::AddMemberResponse(response) => {
                 response?;
-                let user = self
-                    .selected_user
-                    .as_ref()
-                    .expect("Could not get selected user")
-                    .clone();
-                // Remove the user from the dropdown.
-                ctx.props().on_user_added_to_group.emit(user);
+                // Adding the user to the group succeeded
+                if self.current_add_index < self.selected_users.len() {
+                    let user = self.selected_users[self.current_add_index].clone();
+                    
+                    // Notify about the added user
+                    ctx.props().on_user_added_to_group.emit(user);
+                    
+                    // Increment index and continue adding users if there are more
+                    self.current_add_index += 1;
+                    if self.current_add_index < self.selected_users.len() {
+                        return self.add_next_user(ctx);
+                    }
+                }
             }
-            Msg::SelectionChanged(option_props) => {
-                let was_some = self.selected_user.is_some();
-                self.selected_user = option_props.map(|u| User {
-                    id: u.value,
-                    display_name: u.text,
-                });
-                return Ok(self.selected_user.is_some() != was_some);
+            Msg::SelectionChanged(options) => {
+                // Convert selection to User objects
+                self.selected_users = options
+                    .into_iter()
+                    .map(|props| User {
+                        id: props.value,
+                        display_name: props.text,
+                    })
+                    .collect();
+                return Ok(true);
             }
         }
         Ok(true)
@@ -99,11 +110,25 @@ impl AddGroupMemberComponent {
         );
     }
 
-    fn submit_add_member(&mut self, ctx: &Context<Self>) -> Result<bool> {
-        let user_id = match self.selected_user.clone() {
-            None => return Ok(false),
-            Some(user) => user.id,
-        };
+    fn submit_add_members(&mut self, ctx: &Context<Self>) -> Result<bool> {
+        if self.selected_users.is_empty() {
+            return Ok(false);
+        }
+        
+        // Reset the index counter
+        self.current_add_index = 0;
+        
+        // Start adding the first user
+        self.add_next_user(ctx)
+    }
+    
+    fn add_next_user(&mut self, ctx: &Context<Self>) -> Result<bool> {
+        if self.current_add_index >= self.selected_users.len() {
+            return Ok(true);
+        }
+        
+        let user_id = self.selected_users[self.current_add_index].id.clone();
+        
         self.common.call_graphql::<AddUserToGroup, _>(
             ctx,
             add_user_to_group::Variables {
@@ -124,6 +149,23 @@ impl AddGroupMemberComponent {
             .map(Clone::clone)
             .collect()
     }
+    
+    fn get_selectable_options(&self, ctx: &Context<Self>, user_list: &[User]) -> Vec<SelectOptionProps> {
+        self.get_selectable_user_list(ctx, user_list)
+            .into_iter()
+            .map(|user| {
+                let name = if user.display_name.is_empty() {
+                    user.id.clone()
+                } else {
+                    user.display_name.clone()
+                };
+                SelectOptionProps {
+                    value: user.id,
+                    text: name,
+                }
+            })
+            .collect()
+    }
 }
 
 impl Component for AddGroupMemberComponent {
@@ -134,7 +176,8 @@ impl Component for AddGroupMemberComponent {
         let mut res = Self {
             common: CommonComponentParts::<Self>::create(),
             user_list: None,
-            selected_user: None,
+            selected_users: Vec::new(),
+            current_add_index: 0,
         };
         res.get_user_list(ctx);
         res
@@ -152,44 +195,55 @@ impl Component for AddGroupMemberComponent {
     fn view(&self, ctx: &Context<Self>) -> Html {
         let link = ctx.link();
         if let Some(user_list) = &self.user_list {
-            let to_add_user_list = self.get_selectable_user_list(ctx, user_list);
-            #[allow(unused_braces)]
-            let make_select_option = |user: User| {
-                let name = if user.display_name.is_empty() {
-                    user.id.clone()
-                } else {
-                    user.display_name.clone()
-                };
-                html_nested! {
-                    <SelectOption value={user.id.clone()} text={name} key={user.id} />
+            let selectable_options = self.get_selectable_options(ctx, user_list);
+            
+            if selectable_options.is_empty() {
+                html! {
+                    <div class="alert alert-info">
+                        {"All users are already members of this group."}
+                    </div>
                 }
-            };
-            html! {
-            <div class="row">
-              <div class="col-sm-3">
-                <Select on_selection_change={link.callback(Msg::SelectionChanged)}>
-                  {
-                    to_add_user_list
-                        .into_iter()
-                        .map(make_select_option)
-                        .collect::<Vec<_>>()
-                  }
-                </Select>
-              </div>
-              <div class="col-3">
-                <button
-                  class="btn btn-secondary"
-                  disabled={self.selected_user.is_none() || self.common.is_task_running()}
-                  onclick={link.callback(|_| Msg::SubmitAddMember)}>
-                   <i class="bi-person-plus me-2"></i>
-                  {"Add to group"}
-                </button>
-              </div>
-            </div>
+            } else {
+                html! {
+                    <div class="row">
+                        <div class="col-md-8">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h5 class="card-title">{"Add Members"}</h5>
+                                    
+                                    <SearchableSelect 
+                                        options={selectable_options}
+                                        on_selection_change={link.callback(Msg::SelectionChanged)}
+                                        multiple={true}
+                                        placeholder={"Search for users..."}
+                                    />
+                                    
+                                    <div class="mt-3">
+                                        <button
+                                            class="btn btn-primary"
+                                            disabled={self.selected_users.is_empty() || self.common.is_task_running()}
+                                            onclick={link.callback(|_| Msg::SubmitAddMembers)}>
+                                            <i class="bi-person-plus me-2"></i>
+                                            {
+                                                if self.selected_users.len() > 1 {
+                                                    format!("Add {} members", self.selected_users.len())
+                                                } else {
+                                                    "Add member".to_string()
+                                                }
+                                            }
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
             }
         } else {
             html! {
-              {"Loading groups"}
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">{"Loading users..."}</span>
+                </div>
             }
         }
     }

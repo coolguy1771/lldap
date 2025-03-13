@@ -1,6 +1,6 @@
 use crate::{
     components::{
-        select::{Select, SelectOption, SelectOptionProps},
+        select::{SearchableSelect, SelectOptionProps},
         user_details::Group,
     },
     infra::common_component::{CommonComponent, CommonComponentParts},
@@ -44,15 +44,17 @@ pub struct AddUserToGroupComponent {
     common: CommonComponentParts<Self>,
     /// The list of existing groups, initially not loaded.
     group_list: Option<Vec<Group>>,
-    /// The currently selected group.
-    selected_group: Option<Group>,
+    /// The currently selected groups.
+    selected_groups: Vec<Group>,
+    /// For tracking add group status
+    current_add_index: usize,
 }
 
 pub enum Msg {
     GroupListResponse(Result<get_group_list::ResponseData>),
-    SubmitAddGroup,
+    SubmitAddGroups,
     AddGroupResponse(Result<add_user_to_group::ResponseData>),
-    SelectionChanged(Option<SelectOptionProps>),
+    SelectionChanged(Vec<SelectOptionProps>),
 }
 
 #[derive(yew::Properties, Clone, PartialEq)]
@@ -73,26 +75,33 @@ impl CommonComponent<AddUserToGroupComponent> for AddUserToGroupComponent {
             Msg::GroupListResponse(response) => {
                 self.group_list = Some(response?.groups.into_iter().map(Into::into).collect());
             }
-            Msg::SubmitAddGroup => return self.submit_add_group(ctx),
+            Msg::SubmitAddGroups => return self.submit_add_groups(ctx),
             Msg::AddGroupResponse(response) => {
                 response?;
-                // Adding the user to the group succeeded, we're not in the process of adding a
-                // group anymore.
-                let group = self
-                    .selected_group
-                    .as_ref()
-                    .expect("Could not get selected group")
-                    .clone();
-                // Remove the group from the dropdown.
-                ctx.props().on_user_added_to_group.emit(group);
+                // Adding the user to the group succeeded
+                if self.current_add_index < self.selected_groups.len() {
+                    let group = self.selected_groups[self.current_add_index].clone();
+                    
+                    // Notify about the added group
+                    ctx.props().on_user_added_to_group.emit(group);
+                    
+                    // Increment index and continue adding groups if there are more
+                    self.current_add_index += 1;
+                    if self.current_add_index < self.selected_groups.len() {
+                        return self.add_next_group(ctx);
+                    }
+                }
             }
-            Msg::SelectionChanged(option_props) => {
-                let was_some = self.selected_group.is_some();
-                self.selected_group = option_props.map(|props| Group {
-                    id: props.value.parse::<i64>().unwrap(),
-                    display_name: props.text,
-                });
-                return Ok(self.selected_group.is_some() != was_some);
+            Msg::SelectionChanged(options) => {
+                // Convert selection to Group objects
+                self.selected_groups = options
+                    .into_iter()
+                    .map(|props| Group {
+                        id: props.value.parse::<i64>().unwrap(),
+                        display_name: props.text,
+                    })
+                    .collect();
+                return Ok(true);
             }
         }
         Ok(true)
@@ -113,11 +122,25 @@ impl AddUserToGroupComponent {
         );
     }
 
-    fn submit_add_group(&mut self, ctx: &Context<Self>) -> Result<bool> {
-        let group_id = match &self.selected_group {
-            None => return Ok(false),
-            Some(group) => group.id,
-        };
+    fn submit_add_groups(&mut self, ctx: &Context<Self>) -> Result<bool> {
+        if self.selected_groups.is_empty() {
+            return Ok(false);
+        }
+        
+        // Reset the index counter
+        self.current_add_index = 0;
+        
+        // Start adding the first group
+        self.add_next_group(ctx)
+    }
+    
+    fn add_next_group(&mut self, ctx: &Context<Self>) -> Result<bool> {
+        if self.current_add_index >= self.selected_groups.len() {
+            return Ok(true);
+        }
+        
+        let group_id = self.selected_groups[self.current_add_index].id;
+        
         self.common.call_graphql::<AddUserToGroup, _>(
             ctx,
             add_user_to_group::Variables {
@@ -138,6 +161,16 @@ impl AddUserToGroupComponent {
             .map(Clone::clone)
             .collect()
     }
+    
+    fn get_selectable_options(&self, props: &Props, group_list: &[Group]) -> Vec<SelectOptionProps> {
+        self.get_selectable_group_list(props, group_list)
+            .into_iter()
+            .map(|group| SelectOptionProps {
+                value: group.id.to_string(),
+                text: group.display_name,
+            })
+            .collect()
+    }
 }
 
 impl Component for AddUserToGroupComponent {
@@ -147,7 +180,8 @@ impl Component for AddUserToGroupComponent {
         let mut res = Self {
             common: CommonComponentParts::<Self>::create(),
             group_list: None,
-            selected_group: None,
+            selected_groups: Vec::new(),
+            current_add_index: 0,
         };
         res.get_group_list(ctx);
         res
@@ -165,39 +199,55 @@ impl Component for AddUserToGroupComponent {
     fn view(&self, ctx: &Context<Self>) -> Html {
         let link = ctx.link();
         if let Some(group_list) = &self.group_list {
-            let to_add_group_list = self.get_selectable_group_list(ctx.props(), group_list);
-            #[allow(unused_braces)]
-            let make_select_option = |group: Group| {
-                html_nested! {
-                    <SelectOption value={group.id.to_string()} text={group.display_name} key={group.id} />
+            let selectable_options = self.get_selectable_options(ctx.props(), group_list);
+            
+            if selectable_options.is_empty() {
+                html! {
+                    <div class="alert alert-info">
+                        {"User is already a member of all available groups."}
+                    </div>
                 }
-            };
-            html! {
-            <div class="row">
-              <div class="col-sm-3">
-                <Select on_selection_change={link.callback(Msg::SelectionChanged)}>
-                  {
-                    to_add_group_list
-                        .into_iter()
-                        .map(make_select_option)
-                        .collect::<Vec<_>>()
-                  }
-                </Select>
-              </div>
-              <div class="col-sm-3">
-                <button
-                  class="btn btn-secondary"
-                  disabled={self.selected_group.is_none() || self.common.is_task_running()}
-                  onclick={link.callback(|_| Msg::SubmitAddGroup)}>
-                  <i class="bi-person-plus me-2"></i>
-                  {"Add to group"}
-                </button>
-              </div>
-            </div>
+            } else {
+                html! {
+                    <div class="row">
+                        <div class="col-md-8">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h5 class="card-title">{"Add to Groups"}</h5>
+                                    
+                                    <SearchableSelect 
+                                        options={selectable_options}
+                                        on_selection_change={link.callback(Msg::SelectionChanged)}
+                                        multiple={true}
+                                        placeholder={"Search for groups..."}
+                                    />
+                                    
+                                    <div class="mt-3">
+                                        <button
+                                            class="btn btn-primary"
+                                            disabled={self.selected_groups.is_empty() || self.common.is_task_running()}
+                                            onclick={link.callback(|_| Msg::SubmitAddGroups)}>
+                                            <i class="bi-person-plus me-2"></i>
+                                            {
+                                                if self.selected_groups.len() > 1 {
+                                                    format!("Add to {} groups", self.selected_groups.len())
+                                                } else {
+                                                    "Add to group".to_string()
+                                                }
+                                            }
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
             }
         } else {
             html! {
-              {"Loading groups"}
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">{"Loading groups..."}</span>
+                </div>
             }
         }
     }
